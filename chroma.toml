@@ -1,0 +1,141 @@
+# Output path for training runs. Each training run makes a new directory in here.
+output_dir = 'output'
+
+# Dataset config file.
+dataset = 'dataset.toml'
+# You can have separate eval datasets. Give them a name for Tensorboard metrics.
+# eval_datasets = [
+#     {name = 'infernus_eval', config = '/mnt/tsar/diffusion-pipe/datasets/1_eval.toml'},
+# ]
+
+# training settings
+
+# I usually set this to a really high value because I don't know how long I want to train.
+epochs = 100
+# Batch size of a single forward/backward pass for one GPU.
+micro_batch_size_per_gpu = 3
+# Pipeline parallelism degree. A single instance of the model is divided across this many GPUs.
+pipeline_stages = 1
+# Number of micro-batches sent through the pipeline for each training step.
+# If pipeline_stages > 1, a higher GAS means better GPU utilization due to smaller pipeline bubbles (where GPUs aren't overlapping computation).
+gradient_accumulation_steps = 1
+# Grad norm clipping.
+gradient_clipping = 0.0
+# Learning rate warmup.
+warmup_steps = 5
+
+# Block swapping is supported for Wan, HunyuanVideo, Flux, and Chroma. This value controls the number
+# of blocks kept offloaded to RAM. Increasing it lowers VRAM use, but has a performance penalty. The
+# exactly performance penalty depends on the model and the type of training you are doing (e.g. images vs video).
+# Block swapping only works for LoRA training, and requires pipeline_stages=1.
+blocks_to_swap = 18
+
+# eval settings
+
+eval_every_n_epochs = 1
+eval_before_first_step = true
+# Might want to set these lower for eval so that less images get dropped (eval dataset size is usually much smaller than training set).
+# Each size bucket of images/videos is rounded down to the nearest multiple of the global batch size, so higher global batch size means
+# more dropped images. Usually doesn't matter for training but the eval set is much smaller so it can matter.
+eval_micro_batch_size_per_gpu = 1
+eval_gradient_accumulation_steps = 1
+
+# misc settings
+
+# Probably want to set this a bit higher if you have a smaller dataset so you don't end up with a million saved models.
+save_every_n_epochs = 1
+# Can checkpoint the training state every n number of epochs or minutes. Set only one of these. You can resume from checkpoints using the --resume_from_checkpoint flag.
+#checkpoint_every_n_epochs = 1
+checkpoint_every_n_minutes = 60
+# Always set to true unless you have a huge amount of VRAM.
+activation_checkpointing = 'unsloth'
+# Controls how Deepspeed decides how to divide layers across GPUs. Probably don't change this.
+partition_method = 'parameters'
+# dtype for saving the LoRA or model, if different from training dtype
+save_dtype = 'bfloat16'
+# Batch size for caching latents and text embeddings. Increasing can lead to higher GPU utilization during caching phase but uses more memory.
+caching_batch_size = 1
+# How often deepspeed logs to console.
+steps_per_print = 1
+# How to extract video clips for training from a single input video file.
+# The video file is first assigned to one of the configured frame buckets, but then we must extract one or more clips of exactly the right
+# number of frames for that bucket.
+# single_beginning: one clip starting at the beginning of the video
+# single_middle: one clip from the middle of the video (cutting off the start and end equally)
+# multiple_overlapping: extract the minimum number of clips to cover the full range of the video. They might overlap some.
+# default is single_beginning
+#video_clip_mode = 'single_beginning'
+
+# --- Inference configuration ---
+[inference]
+# Generate samples every N epochs (set > 0 to enable)
+inference_every_n_epochs = 5
+# Or generate every N steps (set one, or both if needed)
+# inference_every_n_steps = 500
+# Folder where samples will be saved (relative to the run directory)
+inference_folder = "samples"
+# Number of denoising steps
+steps = 20
+# Guidance scale (Chroma specific, might be 0)
+guidance = 0
+# Classifier-free guidance scale
+cfg = 3
+# First N steps without classifier-free guidance
+first_n_steps_wo_cfg = 0
+# Image dimensions [width, height] - MATCH YOUR TRAINING DATA/MODEL EXPECTATIONS
+image_dim = [512, 512]
+# Maximum length for T5 tokenizer
+t5_max_length = 512
+# Prompts for sample generation
+prompts = [
+    "a cute cat sat on a mat while receiving a head pat from his owner called Matt",
+    "baked potato, on the space floating orbiting around the earth"
+]
+# Optional seed for reproducible samples (otherwise uses rank+step)
+seed = 42
+
+[model]
+type = 'chroma'
+# Can load HunyuanVideo entirely from the ckpt path set up for the official inference scripts.
+#ckpt_path = '/home/anon/HunyuanVideo/ckpts'
+# Or you can load it by pointing to all the ComfyUI files.
+transformer_path = '/workspace/models/chroma/chroma-unlocked-v16.safetensors'
+diffusers_path = '/workspace/models/flux'
+# Base dtype used for all models.
+dtype = 'bfloat16'
+# Hunyuan Video supports fp8 for the transformer when training LoRA.
+transformer_dtype = 'float8'
+# Enable flux_shift for dynamic position scaling - critical for sampling at different resolutions
+flux_shift = true
+
+# For models that support full fine tuning, simply delete or comment out the [adapter] table to FFT.
+[adapter]
+type = 'lora'
+rank = 16 # Increase rank if needed
+dtype = 'bfloat16'
+dropout = 0.2 # Adjust dropout
+# You can initialize the lora weights from a previously trained lora.
+#init_from_existing = '/mnt/tsar/ComfyUI/models/loras/FLUX/GregRutkowski-ChromaV16.safetensors'
+
+[optimizer]
+# AdamW from the optimi library is a good default since it automatically uses Kahan summation when training bfloat16 weights.
+# Look at train.py for other options. You could also easily edit the file and add your own.
+# type = 'adamw_optimi'
+# lr = 3e-4
+# betas = [0.9, 0.99]
+# weight_decay = 0.01
+# eps = 1e-4
+
+type = "Prodigy"
+betas = [0.9, 0.99]
+weight_decay = 0.05
+#cautious_min = 0.5
+
+# Can use this optimizer for a bit less memory usage.
+
+# [optimizer]
+# type = 'AdamW8bitKahan'
+# lr = 2e-5
+# betas = [0.9, 0.99]
+# weight_decay = 0.01
+# stabilize = false
