@@ -1,5 +1,5 @@
-# Copyright kohya-ss
-# Original source: https://github.com/kohya-ss/musubi-tuner/02dbf5206c0e3915b69ad9ef69793b1afecfd9dc/main/modules/custom_offloading_utils.py
+# Original implementation by kohya-ss
+# - https://github.com/kohya-ss/musubi-tuner/02dbf5206c0e3915b69ad9ef69793b1afecfd9dc/main/modules/custom_offloading_utils.py
 
 # Modifications by tdrussell
 # NOTE: this is modified to work with LoRA training only, and checks for 'lora' in the parameter
