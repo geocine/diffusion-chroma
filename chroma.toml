@@ -57,14 +57,6 @@ save_dtype = 'bfloat16'
 caching_batch_size = 1
 # How often deepspeed logs to console.
 steps_per_print = 1
-# How to extract video clips for training from a single input video file.
-# The video file is first assigned to one of the configured frame buckets, but then we must extract one or more clips of exactly the right
-# number of frames for that bucket.
-# single_beginning: one clip starting at the beginning of the video
-# single_middle: one clip from the middle of the video (cutting off the start and end equally)
-# multiple_overlapping: extract the minimum number of clips to cover the full range of the video. They might overlap some.
-# default is single_beginning
-#video_clip_mode = 'single_beginning'
 
 # --- Inference configuration ---
 [inference]
@@ -96,14 +88,10 @@ seed = 42
 
 [model]
 type = 'chroma'
-# Can load HunyuanVideo entirely from the ckpt path set up for the official inference scripts.
-#ckpt_path = '/home/anon/HunyuanVideo/ckpts'
-# Or you can load it by pointing to all the ComfyUI files.
 transformer_path = '/workspace/models/chroma/chroma-unlocked-v16.safetensors'
 diffusers_path = '/workspace/models/flux'
 # Base dtype used for all models.
 dtype = 'bfloat16'
-# Hunyuan Video supports fp8 for the transformer when training LoRA.
 transformer_dtype = 'float8'
 # Enable flux_shift for dynamic position scaling - critical for sampling at different resolutions
 flux_shift = true
@@ -114,28 +102,62 @@ type = 'lora'
 rank = 16 # Increase rank if needed
 dtype = 'bfloat16'
 dropout = 0.2 # Adjust dropout
-# You can initialize the lora weights from a previously trained lora.
-#init_from_existing = '/mnt/tsar/ComfyUI/models/loras/FLUX/GregRutkowski-ChromaV16.safetensors'
 
+# --------------------------------
+# OPTIMIZER CONFIGURATIONS
+# --------------------------------
+# Uncomment one of the configurations below and comment out the others
+
+# --------- DEFAULT OPTIMIZER ---------
+# SCORN optimizer -  Default configuration 
 [optimizer]
-# AdamW from the optimi library is a good default since it automatically uses Kahan summation when training bfloat16 weights.
-# Look at train.py for other options. You could also easily edit the file and add your own.
-# type = 'adamw_optimi'
-# lr = 3e-4
-# betas = [0.9, 0.99]
+type = 'scorn'  
+lr = 1e-4
+betas = [0.95, 0.9999]
+weight_decay = 0.01
+
+
+# REMASTER optimizer - Alternative configuration
+# [optimizer]
+# type = 'remaster'  
+# lr = 1e-4
+# betas = [0.95, 0.9999]
 # weight_decay = 0.01
-# eps = 1e-4
+# orthograd = true
+# amp = 5.0
+# stochastic_fp = true
 
-type = "Prodigy"
-betas = [0.9, 0.99]
-weight_decay = 0.05
-#cautious_min = 0.5
 
-# Can use this optimizer for a bit less memory usage.
+# PersonaOptimizer - Feature-focused learning configuration
+# [optimizer]
+# type = 'persona'
+# lr = 1e-4
+# betas = [0.95, 0.999]
+# weight_decay = 0.01
+# focus_boost = 0.05  # Enables gradient variance modulation (0.0 to disable)
+# amp_factor = 1.0
+# orthograd = false
+# stochastic_fp = true
 
+
+# --------- MEMORY-OPTIMIZED OPTIMIZERS ---------
+# Adafactor optimizer - Default configuration (memory efficient)
+# [optimizer]
+# type = 'adafactor'
+# lr = 1e-4
+# scale_parameter = false
+# relative_step = false
+# weight_decay = 0.01
+
+# Prodigy optimizer
+# [optimizer]
+# type = "Prodigy"
+# betas = [0.9, 0.99]
+# weight_decay = 0.05
+
+# AdamW8bitKahan optimizer - Memory efficient
 # [optimizer]
 # type = 'AdamW8bitKahan'
 # lr = 2e-5
 # betas = [0.9, 0.99]
 # weight_decay = 0.01
-# stabilize = false

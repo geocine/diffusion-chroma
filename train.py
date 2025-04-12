@@ -249,6 +249,14 @@ if __name__ == '__main__':
 
     set_config_defaults(config)
     common.AUTOCAST_DTYPE = config['model']['dtype']
+    
+    # Log optimizer configuration
+    if 'optimizer' in config:
+        optimizer_config = config['optimizer']
+        print("\n" + "="*50)
+        print(f"Training with optimizer: {optimizer_config.get('type', 'default')}")
+        print(f"Optimizer settings: {', '.join(f'{k}={v}' for k, v in optimizer_config.items() if k != 'type')}")
+        print("="*50 + "\n")
 
     # Initialize distributed environment before deepspeed
     world_size, rank, local_rank = distributed_init(args)
@@ -434,6 +442,18 @@ if __name__ == '__main__':
         elif optim_type_lower == 'adamw8bitkahan':
             from optimizers import adamw_8bit
             klass = adamw_8bit.AdamW8bitKahan
+        elif optim_type_lower == 'scorn':
+            from optimizers.scorn import SCORN
+            klass = SCORN
+        elif optim_type_lower == 'adafactor':
+            from optimizers.adafactor import EnhancedAdafactor
+            klass = EnhancedAdafactor
+        elif optim_type_lower == 'remaster':
+            from optimizers.remaster import REMASTER
+            klass = REMASTER
+        elif optim_type_lower == 'persona':
+            from optimizers.persona import PersonaOptimizer
+            klass = PersonaOptimizer
         elif optim_type_lower == 'offload':
             from torchao.prototype.low_bit_optim import CPUOffloadOptimizer
             klass = CPUOffloadOptimizer
@@ -512,6 +532,14 @@ if __name__ == '__main__':
         config=ds_config,
     )
     model.model_engine = model_engine
+    
+    # Log optimizer information after initialization
+    print(f"\n[INFO] Optimizer successfully initialized: {optimizer.__class__.__name__}")
+    print(f"[INFO] Parameter groups: {len(optimizer.param_groups)}")
+    for i, pg in enumerate(optimizer.param_groups):
+        param_count = sum(p.numel() for p in pg['params'])
+        print(f"[INFO] Group {i}: {param_count} parameters with learning rate: {pg.get('lr', 'default')}")
+    print("")
 
     # Simplified: model_engine.is_pipe_parallel will be False for num_stages=1
     # The block 'if model_engine.is_pipe_parallel:' is removed.
