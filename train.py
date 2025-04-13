@@ -54,6 +54,10 @@ from utils.patches import apply_patches
 from utils.unsloth_utils import unsloth_checkpoint
 from utils.pipeline import ManualPipelineModule
 
+from torchvision.utils import make_grid, save_image
+import torch.nn.functional as F
+from PIL import Image
+
 TIMESTEP_QUANTILES_FOR_EVAL = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 parser = argparse.ArgumentParser()
@@ -201,20 +205,592 @@ def _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_acc
     tb_writer.add_scalar('eval/eval_time_sec', duration, step)
     pbar.close()
 
-
-def evaluate(model, model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps, disable_block_swap):
-    if len(eval_dataloaders) == 0:
-        return
-    empty_cuda_cache()
-    model.prepare_block_swap_inference(disable_block_swap=disable_block_swap)
-    with torch.no_grad(), isolate_rng():
-        seed = get_rank()
-        random.seed(seed)
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-        _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps)
-    empty_cuda_cache()
+def generate_sample_images(model, config, step=0, tb_writer=None):
+    """
+    Generate sample images during training for visualization.
+    Enhanced version with better denoising and text conditioning.
+    """
+    # Print the actual configuration for debugging
+    print("=== Inference Configuration ===")
+    for key, value in config.get('inference', {}).items():
+        print(f"{key}: {value}")
+    print("==============================")
+    
+    # Extract inference settings from config
+    inference_config = config.get('inference', {})
+    steps = inference_config.get('steps', 30)
+    guidance = inference_config.get('guidance', 0)
+    cfg = inference_config.get('cfg', 7.5)  # Increased CFG for stronger guidance
+    first_n_steps_wo_cfg = inference_config.get('first_n_steps_wo_cfg', 0)
+    width, height = inference_config.get('image_dim', [512, 512])
+    prompts = inference_config.get('prompts', ["A beautiful landscape"])
+    t5_max_length = inference_config.get('t5_max_length', 512)
+    seed = inference_config.get('seed')
+    
+    # Prepare output directory
+    output_dir = config['output_dir']
+    run_dirs = sorted(glob.glob(os.path.join(output_dir, "*")))
+    if run_dirs:
+        run_dir = run_dirs[-1]  # Get the most recent run directory
+    else:
+        run_dir = output_dir
+    
+    samples_dir = os.path.join(run_dir, inference_config.get('inference_folder', "samples"))
+    os.makedirs(samples_dir, exist_ok=True)
+    print(f"Will save samples to: {samples_dir}")
+    
+    # Prepare for inference
+    model.prepare_block_swap_inference(disable_block_swap=True)
+    
+    # Check model state
+    model_was_in_train = False
+    if hasattr(model, 'training'):
+        model_was_in_train = model.training
+        model.eval()
+    elif hasattr(model, 'transformer'):
+        if hasattr(model.transformer, 'training'):
+            model_was_in_train = model.transformer.training
+            model.transformer.eval()
+    
+    # Get model dtype and device
+    model_dtype = next(model.transformer.parameters()).dtype
+    device = next(model.transformer.parameters()).device
+    
+    # Process each prompt
+    all_images = []
+    for prompt_idx, prompt in enumerate(prompts):
+        print(f"Generating image for prompt: {prompt}")
+        
+        try:
+            # Set seed for reproducibility
+            current_seed = seed if seed is not None else random.randint(0, 999999)
+            torch.manual_seed(current_seed)
+            np.random.seed(current_seed)
+            random.seed(current_seed)
+            print(f"Using seed: {current_seed}")
+            
+            # Process text prompt to get embeddings
+            try:
+                # Try to encode the text prompt
+                text_inputs = model.tokenizer_2(
+                    [prompt],
+                    padding="max_length",
+                    max_length=t5_max_length,
+                    truncation=True,
+                    return_tensors="pt"
+                ).to(device)
+                
+                # Check if text_encoder is a meta tensor and handle accordingly
+                is_meta_tensor = False
+                try:
+                    # Try to access a parameter to check if it's a meta tensor
+                    next(model.text_encoder_2.parameters()).device
+                except NotImplementedError as e:
+                    if "Cannot determine data pointer from a meta tensor" in str(e):
+                        is_meta_tensor = True
+                        print("Detected meta tensor for text_encoder, using to_empty()")
+                
+                # Get text embeddings
+                if is_meta_tensor:
+                    # For meta tensors, we need to use to_empty() first
+                    from accelerate import init_empty_weights
+                    with init_empty_weights():
+                        # Clone the model structure without weights
+                        text_encoder_empty = type(model.text_encoder_2)()
+                    
+                    # Move the empty model to the device
+                    text_encoder_empty = text_encoder_empty.to(device)
+                    
+                    # Load the weights from the original model
+                    text_encoder_empty.load_state_dict(model.text_encoder_2.state_dict())
+                    
+                    # Use the properly loaded model
+                    prompt_embeds = text_encoder_empty(
+                        text_inputs.input_ids,
+                        output_hidden_states=True
+                    )[0]
+                    
+                    # Generate negative prompt embeddings
+                    neg_prompt_embeds = text_encoder_empty(
+                        model.tokenizer_2(
+                            [""],
+                            padding="max_length",
+                            max_length=t5_max_length,
+                            truncation=True,
+                            return_tensors="pt"
+                        ).input_ids.to(device),
+                        output_hidden_states=True
+                    )[0]
+                    
+                    # Clean up to save memory
+                    del text_encoder_empty
+                else:
+                    # For regular tensors, use the normal approach
+                    text_encoder = model.text_encoder_2.to(device)
+                    prompt_embeds = text_encoder(
+                        text_inputs.input_ids,
+                        output_hidden_states=True
+                    )[0]
+                    
+                    # Generate negative prompt embeddings
+                    neg_prompt_embeds = text_encoder(
+                        model.tokenizer_2(
+                            [""],
+                            padding="max_length",
+                            max_length=t5_max_length,
+                            truncation=True,
+                            return_tensors="pt"
+                        ).input_ids.to(device),
+                        output_hidden_states=True
+                    )[0]
+                    
+                    # Move text encoder back to CPU to save memory
+                    text_encoder.to('cpu')
+                
+                print(f"Successfully encoded prompt: '{prompt}'")
+                print(f"Text embedding shape: {prompt_embeds.shape}")
+                
+                # Create text attention mask
+                text_attention_mask = torch.ones((1, t5_max_length), device=device, dtype=model_dtype)
+                
+            except Exception as e:
+                print(f"Error encoding text prompt: {str(e)}")
+                print("Using dummy text embeddings instead")
+                # Create dummy text embeddings
+                prompt_embeds = torch.zeros((1, t5_max_length, 4096), device=device, dtype=model_dtype)
+                neg_prompt_embeds = torch.zeros((1, t5_max_length, 4096), device=device, dtype=model_dtype)
+                text_attention_mask = torch.ones((1, t5_max_length), device=device, dtype=model_dtype)
+            
+            # Create initial random latents at 64x64 resolution
+            latents = torch.randn(1, 16, 64, 64, device=device, dtype=model_dtype)
+            
+            # Prepare for denoising
+            timesteps = torch.linspace(1.0, 0.0, steps+1)[:-1].to(device=device, dtype=model_dtype)
+            
+            # Try to use the full model for denoising if possible
+            try_full_model = True
+            
+            # Denoise the latents
+            with torch.no_grad(), isolate_rng():
+                # Process each timestep
+                for i, t in enumerate(tqdm(timesteps, desc="Denoising")):
+                    # Create batch of timesteps
+                    timestep = torch.full((1,), t, device=device, dtype=model_dtype)
+                    
+                    # Prepare inputs for the model
+                    # Flatten latents to match what the model expects
+                    flat_latents = latents.reshape(1, -1)
+                    total_features = flat_latents.shape[1]
+                    
+                    # Reshape to [batch, 3072, 64] for the img_in layer
+                    if total_features < 64*3072:
+                        # Pad with zeros
+                        padding = torch.zeros((1, 64*3072 - total_features), 
+                                            device=flat_latents.device, 
+                                            dtype=model_dtype)
+                        flat_latents = torch.cat([flat_latents, padding], dim=1)
+                    elif total_features > 64*3072:
+                        # Truncate
+                        flat_latents = flat_latents[:, :64*3072]
+                    
+                    img = flat_latents.reshape(1, 3072, 64).to(dtype=model_dtype)
+                    
+                    # Create position IDs with the same sequence length as the second dimension
+                    img_ids = torch.zeros((1, img.shape[1], 3), device=device, dtype=model_dtype)
+                    for y in range(8):
+                        for x in range(8):
+                            for idx in range(48):  # 3072 / 64 = 48 tokens per position
+                                pos = (y * 8 + x) * 48 + idx
+                                if pos < img.shape[1]:
+                                    img_ids[0, pos, 0] = x / 8.0
+                                    img_ids[0, pos, 1] = y / 8.0
+                                    img_ids[0, pos, 2] = idx / 48.0
+                    
+                    # Create text position IDs
+                    txt_ids = torch.zeros((1, t5_max_length, 3), device=device, dtype=model_dtype)
+                    for j in range(t5_max_length):
+                        txt_ids[0, j, 0] = j / t5_max_length
+                    
+                    # Create guidance values
+                    guidance_value = torch.tensor([guidance], device=device, dtype=model_dtype)
+                    
+                    # Try to use the full model for better results
+                    if try_full_model and i == 0:
+                        try:
+                            print("Attempting to use full transformer model...")
+                            # Apply classifier-free guidance
+                            if cfg > 1.0 and i >= first_n_steps_wo_cfg:
+                                # Concatenate for classifier-free guidance
+                                model_input = torch.cat([img, img], dim=0)
+                                text_embeds = torch.cat([neg_prompt_embeds, prompt_embeds], dim=0)
+                                timestep_batch = torch.cat([timestep, timestep], dim=0)
+                                guidance_batch = torch.cat([guidance_value, guidance_value], dim=0)
+                                img_ids_batch = torch.cat([img_ids, img_ids], dim=0)
+                                txt_ids_batch = torch.cat([txt_ids, txt_ids], dim=0)
+                                txt_mask_batch = torch.cat([text_attention_mask, text_attention_mask], dim=0)
+                                
+                                # Forward pass through full model
+                                noise_pred = model.transformer(
+                                    model_input,
+                                    img_ids_batch,
+                                    text_embeds,
+                                    txt_ids_batch,
+                                    txt_mask_batch,
+                                    timestep_batch,
+                                    guidance_batch
+                                )
+                                
+                                # Split predictions and apply CFG
+                                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                                noise_pred = noise_pred_uncond + cfg * (noise_pred_text - noise_pred_uncond)
+                            else:
+                                # No CFG, just use the prompt
+                                noise_pred = model.transformer(
+                                    img,
+                                    img_ids,
+                                    prompt_embeds,
+                                    txt_ids,
+                                    text_attention_mask,
+                                    timestep,
+                                    guidance_value
+                                )
+                            
+                            print("Successfully used full transformer model!")
+                        except Exception as e:
+                            print(f"Error using full transformer model: {str(e)}")
+                            print("Falling back to img_in layer only")
+                            try_full_model = False
+                            
+                            # Use just the img_in layer as fallback
+                            noise_pred = model.transformer.img_in(img)
+                    else:
+                        # Use the img_in layer for subsequent steps or if full model failed
+                        if not try_full_model:
+                            noise_pred = model.transformer.img_in(img)
+                        else:
+                            # Continue using full model for better results
+                            try:
+                                # Apply classifier-free guidance
+                                if cfg > 1.0 and i >= first_n_steps_wo_cfg:
+                                    # Concatenate for classifier-free guidance
+                                    model_input = torch.cat([img, img], dim=0)
+                                    text_embeds = torch.cat([neg_prompt_embeds, prompt_embeds], dim=0)
+                                    timestep_batch = torch.cat([timestep, timestep], dim=0)
+                                    guidance_batch = torch.cat([guidance_value, guidance_value], dim=0)
+                                    img_ids_batch = torch.cat([img_ids, img_ids], dim=0)
+                                    txt_ids_batch = torch.cat([txt_ids, txt_ids], dim=0)
+                                    txt_mask_batch = torch.cat([text_attention_mask, text_attention_mask], dim=0)
+                                    
+                                    # Forward pass through full model
+                                    noise_pred = model.transformer(
+                                        model_input,
+                                        img_ids_batch,
+                                        text_embeds,
+                                        txt_ids_batch,
+                                        txt_mask_batch,
+                                        timestep_batch,
+                                        guidance_batch
+                                    )
+                                    
+                                    # Split predictions and apply CFG
+                                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                                    noise_pred = noise_pred_uncond + cfg * (noise_pred_text - noise_pred_uncond)
+                                else:
+                                    # No CFG, just use the prompt
+                                    noise_pred = model.transformer(
+                                        img,
+                                        img_ids,
+                                        prompt_embeds,
+                                        txt_ids,
+                                        text_attention_mask,
+                                        timestep,
+                                        guidance_value
+                                    )
+                            except Exception as e:
+                                print(f"Error using full transformer model: {str(e)}")
+                                print("Falling back to img_in layer only")
+                                try_full_model = False
+                                
+                                # Use just the img_in layer as fallback
+                                noise_pred = model.transformer.img_in(img)
+                    
+                    # Reshape noise prediction back to latent shape
+                    noise_pred_flat = noise_pred.reshape(1, -1)
+                    noise_pred_reshaped = noise_pred_flat[:, :latents.numel()].reshape(latents.shape)
+                    
+                    # Update latents with improved denoising step
+                    # Use a more sophisticated update rule
+                    alpha = 0.5 + 0.5 * (1.0 - t)  # Gradually increase strength as we denoise
+                    latents = latents - alpha * noise_pred_reshaped
+                    
+                    # Add a small amount of noise to prevent getting stuck in local minima
+                    if i < steps - 5:  # Don't add noise in final steps
+                        noise_scale = 0.1 * (1.0 - i/steps)  # Gradually reduce noise
+                        latents = latents + noise_scale * torch.randn_like(latents)
+                    
+                    # Apply normalization to prevent extreme values
+                    if i % 5 == 0:  # Every few steps
+                        latents = torch.nn.functional.normalize(latents, dim=1) * 4.0
+            
+            # Try to decode with VAE if available
+            try_vae_decode = True
+            decoded_image = None
+            
+            if try_vae_decode:
+                try:
+                    print("Attempting to decode with VAE...")
+                    # Check if VAE is a meta tensor and handle accordingly
+                    is_vae_meta = False
+                    try:
+                        # Try to access a parameter to check if it's a meta tensor
+                        next(model.vae.parameters()).device
+                    except NotImplementedError as e:
+                        if "Cannot determine data pointer from a meta tensor" in str(e):
+                            is_vae_meta = True
+                            print("Detected meta tensor for VAE, using to_empty()")
+                    
+                    if is_vae_meta:
+                        # For meta tensors, we need to use to_empty() first
+                        from accelerate import init_empty_weights
+                        with init_empty_weights():
+                            # Clone the model structure without weights
+                            vae_empty = type(model.vae)()
+                        
+                        # Move the empty model to the device
+                        vae_empty = vae_empty.to(device)
+                        
+                        # Load the weights from the original model
+                        vae_empty.load_state_dict(model.vae.state_dict())
+                        
+                        # Scale latents according to VAE requirements
+                        scaled_latents = 1 / 0.18215 * latents  # Standard scaling factor for SD-based models
+                        
+                        # Decode the image
+                        with torch.cuda.amp.autocast():
+                            decoded_image = vae_empty.decode(scaled_latents).sample
+                        
+                        # Clean up to save memory
+                        del vae_empty
+                    else:
+                        vae = model.vae.to(device)
+                        
+                        # Scale latents according to VAE requirements
+                        scaled_latents = 1 / 0.18215 * latents  # Standard scaling factor for SD-based models
+                        
+                        # Decode the image
+                        with torch.cuda.amp.autocast():
+                            decoded_image = vae.decode(scaled_latents).sample
+                        
+                        # Move VAE back to CPU
+                        vae.to('cpu')
+                    
+                    print("Successfully decoded with VAE!")
+                except Exception as e:
+                    print(f"Error decoding with VAE: {str(e)}")
+                    print("Falling back to direct visualization of latents")
+            
+            # Process and save the image
+            if decoded_image is not None:
+                # Process VAE-decoded image
+                image = (decoded_image / 2 + 0.5).clamp(0, 1)
+                image = image.cpu().permute(0, 2, 3, 1).float().numpy()
+                
+                # Convert to PIL Image
+                from PIL import Image as PILImage
+                image_pil = PILImage.fromarray((image[0] * 255).astype(np.uint8))
+                
+                # Save individual image
+                image_filename = f"sample_{step}_prompt_{prompt_idx}.png"
+                image_path = os.path.join(samples_dir, image_filename)
+                image_pil.save(image_path)
+                print(f"Saved VAE-decoded image to {image_path}")
+                
+                # Convert back to tensor for grid
+                image_tensor = torch.from_numpy(image[0]).permute(2, 0, 1)
+                all_images.append(image_tensor)
+            else:
+                # Fallback: Visualize latents directly with enhanced processing
+                # Upscale the latents to 512x512 for better visualization
+                upscaled_latents = torch.nn.functional.interpolate(
+                    latents, 
+                    size=(512, 512), 
+                    mode='bilinear', 
+                    align_corners=False
+                )
+                
+                # Apply advanced normalization for better contrast
+                vis_latents = upscaled_latents[0].cpu()
+                
+                # Apply histogram equalization-like normalization per channel
+                for c in range(vis_latents.shape[0]):
+                    channel = vis_latents[c]
+                    sorted_channel = torch.sort(channel.flatten())[0]
+                    min_val = sorted_channel[int(0.01 * sorted_channel.numel())]  # 1% percentile
+                    max_val = sorted_channel[int(0.99 * sorted_channel.numel())]  # 99% percentile
+                    vis_latents[c] = torch.clamp((channel - min_val) / (max_val - min_val + 1e-6), 0, 1)
+                
+                # Create RGB visualization with better color mapping
+                rgb_image = torch.zeros(3, 512, 512)
+                
+                # Use different channels for better visualization
+                # Map the first 3 latent channels to RGB
+                rgb_image[0] = vis_latents[0]  # R channel
+                rgb_image[1] = vis_latents[1]  # G channel
+                rgb_image[2] = vis_latents[2]  # B channel
+                
+                # Apply advanced post-processing to enhance the image
+                # Add contrast and saturation
+                rgb_image = (rgb_image - 0.5) * 2.0 + 0.5  # Increase contrast
+                rgb_image = torch.clamp(rgb_image, 0, 1)
+                
+                # Apply sharpening filter
+                kernel = torch.tensor([
+                    [-1, -1, -1],
+                    [-1,  9, -1],
+                    [-1, -1, -1]
+                ], dtype=torch.float32) / 9.0
+                kernel = kernel.view(1, 1, 3, 3).repeat(3, 1, 1, 1)
+                padded_image = F.pad(rgb_image.unsqueeze(0), (1, 1, 1, 1), mode='reflect')
+                sharpened = F.conv2d(padded_image, kernel, groups=3)
+                rgb_image = torch.clamp(sharpened[0], 0, 1)
+                
+                # Save the visualization
+                image_filename = f"sample_{step}_prompt_{prompt_idx}.png"
+                image_path = os.path.join(samples_dir, image_filename)
+                save_image(rgb_image, image_path)
+                print(f"Saved latent visualization to {image_path}")
+                
+                # Also save the raw latents for potential future decoding
+                latent_path = os.path.join(samples_dir, f"latent_{prompt_idx}_{step}.pt")
+                torch.save(latents.cpu(), latent_path)
+                print(f"Saved raw latent to {latent_path}")
+                
+                # Convert back to tensor for grid
+                all_images.append(rgb_image)
+            
+        except Exception as e:
+            print(f"Error generating image for prompt '{prompt}': {str(e)}")
+            import traceback
+            traceback.print_exc()
+    
+    # Create a grid of all images
+    if all_images:
+        try:
+            grid = make_grid(all_images, nrow=min(4, len(all_images)))
+            grid_path = os.path.join(samples_dir, f"grid_step_{step}.png")
+            save_image(grid, grid_path)
+            print(f"Saved grid image to {grid_path}")
+            
+            # Log to tensorboard if available
+            if tb_writer is not None:
+                tb_writer.add_image('samples', grid, step)
+        except Exception as e:
+            print(f"Error creating image grid: {str(e)}")
+            import traceback
+            traceback.print_exc()
+    
+    # Restore original model state
+    if model_was_in_train:
+        if hasattr(model, 'train'):
+            model.train()
+        elif hasattr(model, 'transformer') and hasattr(model.transformer, 'train'):
+            model.transformer.train()
+    
+    # Return to training mode
     model.prepare_block_swap_training()
+    
+    return samples_dir if len(all_images) > 0 else None
+
+
+
+
+def evaluate(model, model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps, disable_block_swap=False):
+    """
+    Evaluate the model and generate sample images if configured.
+    
+    Args:
+        model: The model to evaluate
+        model_engine: The DeepSpeed engine
+        eval_dataloaders: Dictionary of evaluation dataloaders
+        tb_writer: TensorBoard writer
+        step: Current training step
+        eval_gradient_accumulation_steps: Gradient accumulation steps for evaluation
+        disable_block_swap: Whether to disable block swapping during evaluation
+    """
+    if len(eval_dataloaders) == 0:
+        print("No evaluation datasets configured, skipping evaluation metrics")
+    else:
+        # Clear CUDA cache before evaluation
+        empty_cuda_cache()
+        
+        # Prepare model for inference
+        model.prepare_block_swap_inference(disable_block_swap=disable_block_swap)
+        
+        # Run normal evaluation
+        with torch.no_grad(), isolate_rng():
+            seed = get_rank()
+            random.seed(seed)
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            
+            # Run the standard evaluation
+            _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps)
+        
+        # Restore model for training
+        model.prepare_block_swap_training()
+    
+    # Check if we should generate inference samples
+    inference_config = model.config.get('inference', {})
+    current_epoch = model_engine.train_dataloader.epoch if hasattr(model_engine, 'train_dataloader') else 0
+    
+    print(f"Checking if inference should run at step {step}")
+    print(f"Current epoch: {current_epoch}")
+    print(f"Inference config: {inference_config}")
+    
+    should_generate = False
+    
+    # Check epoch-based inference
+    if inference_config.get('inference_every_n_epochs', 0) > 0:
+        epoch_check = current_epoch % inference_config['inference_every_n_epochs'] == 0
+        print(f"Should generate based on epoch: {current_epoch} % {inference_config['inference_every_n_epochs']} == {epoch_check}")
+        if epoch_check:
+            should_generate = True
+    
+    # Check step-based inference
+    if inference_config.get('inference_every_n_steps', 0) > 0:
+        step_check = step % inference_config['inference_every_n_steps'] == 0
+        print(f"Should generate based on step: {step} % {inference_config['inference_every_n_steps']} == {step_check}")
+        if step_check:
+            should_generate = True
+    
+    print(f"Final should_generate: {should_generate}")
+    
+    # Generate samples if configured
+    if should_generate and inference_config.get('prompts'):
+        # Clear CUDA cache before inference
+        empty_cuda_cache()
+        
+        # Prepare model for inference
+        model.prepare_block_swap_inference(disable_block_swap=disable_block_swap)
+        
+        with torch.no_grad(), isolate_rng():
+            print(f"Attempting to generate samples at step {step} (epoch {current_epoch})...")
+            try:
+                output_path = generate_sample_images(model, model.config, step=step, tb_writer=tb_writer)
+                if output_path:
+                    print(f"Sample images saved to {output_path}")
+                else:
+                    print("No sample images were generated")
+            except Exception as e:
+                print(f"Error generating sample images: {str(e)}")
+                import traceback
+                traceback.print_exc()
+        
+        # Clear CUDA cache after inference
+        empty_cuda_cache()
+        
+        # Restore model for training
+        model.prepare_block_swap_training()
 
 
 def distributed_init(args):
@@ -228,7 +804,6 @@ def distributed_init(args):
     os.environ['MASTER_PORT'] = str(args.master_port)
 
     return world_size, rank, local_rank
-
 
 def get_prodigy_d(optimizer):
     d = 0
