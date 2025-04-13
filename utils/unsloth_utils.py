@@ -32,7 +32,12 @@ class Unsloth_Offloaded_Gradient_Checkpointer(torch.autograd.Function):
     @staticmethod
     @torch.amp.custom_fwd(device_type='cuda')
     def forward(ctx, forward_function, hidden_states, *args):
-        saved_hidden_states = hidden_states.to('cpu', non_blocking=True)
+        if hidden_states.is_cuda and hidden_states.is_contiguous():
+            saved_hidden_states = hidden_states.detach().cpu()
+        else:
+            # Make sure it's contiguous before moving
+            saved_hidden_states = hidden_states.contiguous().detach().cpu()
+        #saved_hidden_states = hidden_states.to('cpu', non_blocking=True)
         with torch.no_grad():
             output = forward_function(hidden_states, *args)
         ctx.save_for_backward(saved_hidden_states)
