@@ -88,7 +88,7 @@ seed = 42
 
 [model]
 type = 'chroma'
-transformer_path = '/workspace/models/chroma/chroma-unlocked-v16.safetensors'
+transformer_path = '/workspace/models/chroma/chroma-unlocked-v32.safetensors'
 diffusers_path = '/workspace/models/flux'
 # Base dtype used for all models.
 dtype = 'bfloat16'

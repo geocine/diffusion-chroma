@@ -85,11 +85,11 @@ download_full_model "black-forest-labs/FLUX.1-schnell" "$ROOT_DIR/models/flux"
 
 # Download Chroma model weights
 echo "Downloading Chroma model weights..."
-download_if_not_exists "lodestones/Chroma" "chroma-unlocked-v16.safetensors" "$ROOT_DIR/models/chroma"
+download_if_not_exists "lodestones/Chroma" "chroma-unlocked-v32.safetensors" "$ROOT_DIR/models/chroma"
 
 echo "All downloads completed. Models are stored in the '$ROOT_DIR/models' directory."
 echo "Directory structure:"
 echo "models/"
 echo "├── flux/ (contains the full FLUX.1-schnell model)"
 echo "└── chroma/"
-echo "    └── chroma-unlocked-v16.safetensors" 
+echo "    └── chroma-unlocked-v32.safetensors" 

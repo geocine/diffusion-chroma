@@ -54,7 +54,7 @@ Initializes the project by:
 
 Downloads the necessary model files:
 - FLUX.1-schnell: Base diffusion model
-- Chroma: Pre-trained model weights (chroma-unlocked-v16.safetensors)
+- Chroma: Pre-trained model weights (chroma-unlocked-v32.safetensors)
 
 Requires a Hugging Face token in a file named `token` or as an environment variable `HF_TOKEN`.
 
