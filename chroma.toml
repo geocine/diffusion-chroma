@@ -125,7 +125,6 @@ dropout = 0.2 # Adjust dropout
 [optimizer]
 type = 'scorn'  
 lr = 1e-4
-betas = [0.95, 0.9999]
 weight_decay = 0.01
 
 
@@ -133,7 +132,6 @@ weight_decay = 0.01
 # [optimizer]
 # type = 'remaster'  
 # lr = 1e-4
-# betas = [0.95, 0.9999]
 # weight_decay = 0.01
 # orthograd = true
 # amp = 5.0
@@ -144,7 +142,6 @@ weight_decay = 0.01
 # [optimizer]
 # type = 'persona'
 # lr = 1e-4
-# betas = [0.95, 0.999]
 # weight_decay = 0.01
 # focus_boost = 0.05  # Enables gradient variance modulation (0.0 to disable)
 # amp_factor = 1.0
@@ -164,12 +161,10 @@ weight_decay = 0.01
 # Prodigy optimizer
 # [optimizer]
 # type = "Prodigy"
-# betas = [0.9, 0.99]
 # weight_decay = 0.05
 
 # AdamW8bitKahan optimizer - Memory efficient
 # [optimizer]
 # type = 'AdamW8bitKahan'
 # lr = 2e-5
-# betas = [0.9, 0.99]
 # weight_decay = 0.01

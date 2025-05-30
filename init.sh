@@ -48,6 +48,7 @@ chmod +x run.sh
 
 # Install PyTorch with CUDA support and other dependencies
 echo "Installing dependencies..."
+pip uninstall -y ninja && pip install ninja
 pip install torch torchvision torchaudio --force-reinstall --extra-index-url https://download.pytorch.org/whl/cu126 && pip install -r requirements.txt
 
 # Make the download script executable and run it
