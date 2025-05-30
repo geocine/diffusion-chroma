@@ -16,7 +16,7 @@ This repository provides tools and scripts for training custom Chroma image gene
 
 1. **Intialize the workspace**:
    ```bash
-   curl -s https://raw.githubusercontent.com/geocine/diffusion-chroma/refs/heads/main/init.sh | sh
+   curl -s https://raw.githubusercontent.com/geocine/diffusion-chroma/refs/heads/main/init.sh | bash
    ```
 
 2. **Prepare your dataset**:

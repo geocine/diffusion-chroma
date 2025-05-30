@@ -108,6 +108,18 @@ dropout = 0.2 # Adjust dropout
 # --------------------------------
 # Uncomment one of the configurations below and comment out the others
 
+# --------- AUTOMAGIC OPTIMIZER ---------
+# Automagic optimizer - Adaptive learning rate optimizer with per-parameter learning rates
+# [optimizer]
+# type = 'automagic'
+# lr = 1e-6  # Start learning rate (will be clamped to max 1e-3)
+# min_lr = 1e-7  # Minimum learning rate
+# max_lr = 1e-3  # Maximum learning rate
+# lr_bump = 1e-6  # Amount to bump the lr when adjusting
+# beta2 = 0.999  # Beta2 parameter for exponential moving average
+# weight_decay = 0.0  # Weight decay
+# clip_threshold = 1.0  # Gradient clipping threshold
+
 # --------- DEFAULT OPTIMIZER ---------
 # SCORN optimizer -  Default configuration 
 [optimizer]
