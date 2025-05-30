@@ -56,6 +56,17 @@ def shuffle_with_seed(l, seed=None):
     random.setstate(rng_state)
 
 
+def shuffle_captions(captions: list[str], count: int = 0, delimiter: str = ', ', caption_prefix: str = '') -> list[str]:
+    if count == 0: return captions
+
+    def shuffle_caption(caption: str, delimiter: str = ", ") -> str:
+        split = caption.split(delimiter)
+        random.shuffle(split)
+        return delimiter.join(split)
+
+    return [caption_prefix + shuffle_caption(caption, delimiter) for caption in captions for _ in range(count)]
+
+
 def process_caption_fn(shuffle_tags=False, caption_prefix=''):
     def fn(example):
         with open(example['caption_file']) as f:
@@ -142,6 +153,7 @@ class SizeBucketDataset:
         os.makedirs(self.cache_dir, exist_ok=True)
         self.text_embedding_datasets = []
         self.num_repeats = self.directory_config['num_repeats']
+        self.shuffle_skip = max(directory_config.get('cache_shuffle_num', 0), 1) # Should be provided in DirectoryDataset
         if self.num_repeats <= 0:
             raise ValueError(f'num_repeats must be >0, was {self.num_repeats}')
 
@@ -158,7 +170,8 @@ class SizeBucketDataset:
         iteration_order = []
         for example in self.latent_dataset.select_columns(['image_file', 'caption']):
             image_file = example['image_file']
-            for i, caption in enumerate(example['caption']):
+            captions = example['caption']
+            for i, caption in enumerate([captions[i:i + self.shuffle_skip] for i in range(0, len(captions), self.shuffle_skip)]):
                 iteration_order.append((image_file, caption, i))
         # Shuffle again, since one media file can produce multiple training examples. E.g. video, or maybe
         # in the future data augmentation. Don't need to shuffle text embeddings since those are looked
@@ -185,9 +198,11 @@ class SizeBucketDataset:
         ret = self.latent_dataset[self.image_file_to_latents_idx[image_file]]
         if DEBUG:
             print(Path(image_file).stem)
+        offset = random.randrange(self.shuffle_skip)
+        caption_idx = (caption_number*self.shuffle_skip) + offset
         for ds in self.text_embedding_datasets:
-            ret.update(ds.get_text_embeddings(image_file, caption_number))
-        ret['caption'] = caption
+            ret.update(ds.get_text_embeddings(image_file, caption_idx))
+        ret['caption'] = caption[caption_idx]
         return ret
 
     def __len__(self):
@@ -201,9 +216,11 @@ class ConcatenatedBatchedDataset:
         self.datasets = datasets
         self.post_init_called = False
 
-    def post_init(self, batch_size):
+    def post_init(self, batch_size, batch_size_image):
         iteration_order = []
+        size_bucket = self.datasets[0].size_bucket
         for i, ds in enumerate(self.datasets):
+            assert ds.size_bucket == size_bucket
             iteration_order.extend([i]*len(ds))
         shuffle_with_seed(iteration_order, 0)
         cumulative_sums = [0] * len(self.datasets)
@@ -211,7 +228,7 @@ class ConcatenatedBatchedDataset:
             iteration_order[k] = (dataset_idx, cumulative_sums[dataset_idx])
             cumulative_sums[dataset_idx] += 1
         self.iteration_order = iteration_order
-        self.batch_size = batch_size
+        self.batch_size = batch_size_image if size_bucket[-1] == 1 else batch_size
         self._make_divisible_by(self.batch_size)
         self.post_init_called = True
 
@@ -292,6 +309,9 @@ class DirectoryDataset:
             self.resolutions = self._process_user_provided_resolutions(
                 directory_config.get('resolutions', dataset_config['resolutions'])
             )
+        self.shuffle = directory_config.get('cache_shuffle_num', dataset_config.get('cache_shuffle_num', 0))
+        self.directory_config['cache_shuffle_num'] = self.shuffle # Make accessible if it wasn't yet, for picking one out
+        self.shuffle_delimiter = directory_config.get('cache_shuffle_delimiter', dataset_config.get('cache_shuffle_delimiter', ", "))
         self.path = Path(self.directory_config['path'])
         self.mask_path = Path(self.directory_config['mask_path']) if 'mask_path' in self.directory_config else None
         # For testing. Default if a mask is missing.
@@ -449,13 +469,9 @@ class DirectoryDataset:
             if captions is None:
                 captions = ['']
                 logger.warning(f'Cound not find caption for {image_file}. Using empty caption.')
-            for i, caption in enumerate(captions):
-                if self.directory_config['shuffle_tags']:
-                    tags = [tag.strip() for tag in caption.split(',')]
-                    random.shuffle(tags)
-                    caption = ', '.join(tags)
-                caption = self.directory_config['caption_prefix'] + caption
-                captions[i] = caption
+            if self.directory_config['shuffle_tags'] and self.shuffle == 0: # backwards compatibility
+                self.shuffle = 1
+            captions = shuffle_captions(captions, self.shuffle, self.shuffle_delimiter, self.directory_config['caption_prefix'])
             empty_return = {'image_file': [], 'mask_file': [], 'caption': [], 'ar_bucket': [], 'size_bucket': [], 'is_video': []}
 
             image_file = Path(image_file)
@@ -614,11 +630,13 @@ class Dataset:
             )
             self.directory_datasets.append(directory_dataset)
 
-    def post_init(self, data_parallel_rank, data_parallel_world_size, per_device_batch_size, gradient_accumulation_steps):
+    def post_init(self, data_parallel_rank, data_parallel_world_size, per_device_batch_size, gradient_accumulation_steps, per_device_batch_size_image):
         self.data_parallel_rank = data_parallel_rank
         self.data_parallel_world_size = data_parallel_world_size
         self.batch_size = per_device_batch_size * gradient_accumulation_steps
+        self.batch_size_image = per_device_batch_size_image * gradient_accumulation_steps
         self.global_batch_size = self.data_parallel_world_size * self.batch_size
+        self.global_batch_size_image = self.data_parallel_world_size * self.batch_size_image
 
         # group same size_bucket together
         datasets_by_size_bucket = defaultdict(list)
@@ -630,7 +648,7 @@ class Dataset:
             self.buckets.append(ConcatenatedBatchedDataset(datasets))
 
         for bucket in self.buckets:
-            bucket.post_init(self.global_batch_size)
+            bucket.post_init(self.global_batch_size, self.global_batch_size_image)
 
         iteration_order = []
         for i, bucket in enumerate(self.buckets):
@@ -909,6 +927,12 @@ def split_batch(batch, pieces):
 # Updates epoch as soon as the final batch is returned (notably different from qlora-pipe).
 class PipelineDataLoader:
     def __init__(self, dataset, model_engine, gradient_accumulation_steps, model, num_dataloader_workers=2):
+        if len(dataset) == 0:
+            raise RuntimeError(
+                'Processed dataset was empty. Probably caused by rounding down for each size bucket.\n'
+                'Try decreasing the global batch size, or increasing num_repeats.\n'
+                f'The dataset config that triggered this error was:\n{dataset.dataset_config}'
+            )
         self.model = model
         self.dataset = dataset
         self.model_engine = model_engine

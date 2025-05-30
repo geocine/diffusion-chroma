@@ -14,7 +14,7 @@ This repository provides tools and scripts for training custom Chroma image gene
 
 ## Quick Start
 
-1. **Clone the repository**:
+1. **Intialize the workspace**:
    ```bash
    curl -s https://raw.githubusercontent.com/geocine/diffusion-chroma/refs/heads/main/init.sh | sh
    ```

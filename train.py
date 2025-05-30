@@ -33,6 +33,7 @@ import random
 import json
 import inspect
 from pathlib import Path
+from collections import defaultdict
 
 import toml
 import deepspeed
@@ -71,6 +72,24 @@ parser = deepspeed.add_config_arguments(parser)
 args = parser.parse_args()
 
 
+class DummyOptimizer(torch.optim.Optimizer):
+    def __init__(self):
+        self.state = defaultdict(dict)
+        self.param_groups = []
+
+    def step(self, closure=None):
+        pass
+
+    def zero_grad(self, set_to_none: bool = True):
+        pass
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, state_dict):
+        pass
+
+
 # Monkeypatch this so it counts all layer parameters, not just trainable parameters.
 # This helps it divide the layers between GPUs more evenly when training a LoRA.
 def _count_all_layer_params(self):
@@ -99,8 +118,8 @@ def set_config_defaults(config):
     model_config = config['model']
     model_dtype_str = model_config['dtype']
     model_config['dtype'] = DTYPE_MAP[model_dtype_str]
-    if 'transformer_dtype' in model_config:
-        model_config['transformer_dtype'] = DTYPE_MAP[model_config['transformer_dtype']]
+    if transformer_dtype := model_config.get('transformer_dtype', None):
+        model_config['transformer_dtype'] = DTYPE_MAP.get(transformer_dtype, transformer_dtype)
     model_config.setdefault('guidance', 1.0)
 
     if 'adapter' in config:
@@ -237,6 +256,17 @@ def get_prodigy_d(optimizer):
     return d / len(optimizer.param_groups)
 
 
+def _get_automagic_lrs(optimizer):
+    lrs = []
+    for group in optimizer.param_groups:
+        for p in group['params']:
+            state = optimizer.state[p]
+            lr = optimizer._get_lr(group, state)
+            lrs.append(lr)
+    lrs = torch.stack(lrs)
+    return lrs, lrs.mean()
+
+
 if __name__ == '__main__':
     apply_patches()
 
@@ -346,8 +376,7 @@ if __name__ == '__main__':
         # SDXL special case is removed as model is chroma
         model.configure_adapter(adapter_config) # Configure the LoRA adapter
         is_adapter = True
-        if init_from_existing:
-            # Assuming chroma doesn't use the diffusers method like SDXL might
+        if init_from_existing := adapter_config.get('init_from_existing', None):
             model.load_adapter_weights(init_from_existing)
     else:
         is_adapter = False
@@ -358,7 +387,9 @@ if __name__ == '__main__':
         run_dir = os.path.join(config['output_dir'], datetime.now(timezone.utc).strftime('%Y%m%d_%H-%M-%S'))
         os.makedirs(run_dir, exist_ok=True)
         shutil.copy(args.config, run_dir)
-    # Removed dist.barrier()
+        shutil.copy(config['dataset'], run_dir)
+        for eval_dataset in config['eval_datasets']:
+            shutil.copy(eval_dataset['config'], run_dir)
     # wait for all processes then get the most recent dir (may have just been created)
     # Barrier was removed as it's a no-op for world size 1
 
@@ -416,6 +447,9 @@ if __name__ == '__main__':
     parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
 
     def get_optimizer(model_parameters):
+        if len(model_parameters) == 0:
+            return DummyOptimizer()
+
         optim_config = config['optimizer']
         optim_type = optim_config['type']
         optim_type_lower = optim_type.lower()
@@ -459,6 +493,9 @@ if __name__ == '__main__':
             klass = CPUOffloadOptimizer
             args.append(torch.optim.AdamW)
             kwargs['fused'] = True
+        elif optim_type_lower == 'automagic':
+            from optimizers import automagic
+            klass = automagic.Automagic
         else:
             import pytorch_optimizer
             klass = getattr(pytorch_optimizer, optim_type)
@@ -475,6 +512,7 @@ if __name__ == '__main__':
             # As part of this, any grads that are None are set to zeros. We're doing gradient release to save memory,
             # so we have to avoid this.
             def _exec_reduce_grads(self):
+                assert self.mpu.get_data_parallel_world_size() == 1, 'When using gradient release, data parallel world size must be 1. Make sure pipeline_stages = num_gpus.'
                 return
             deepspeed.runtime.pipe.engine.PipelineEngine._INSTRUCTION_MAP[deepspeed.runtime.pipe.schedule.ReduceGrads] = _exec_reduce_grads
 
@@ -557,6 +595,7 @@ if __name__ == '__main__':
         1, # model_engine.grid.get_data_parallel_world_size(),
         model_engine.train_micro_batch_size_per_gpu(),
         model_engine.gradient_accumulation_steps(),
+        config.get('image_micro_batch_size_per_gpu', model_engine.train_micro_batch_size_per_gpu()),
     )
     for eval_data in eval_data_map.values():
         # Simplified data parallel rank (0) and world size (1)
@@ -565,6 +604,7 @@ if __name__ == '__main__':
             1, # model_engine.grid.get_data_parallel_world_size(),
             config.get('eval_micro_batch_size_per_gpu', model_engine.train_micro_batch_size_per_gpu()),
             config['eval_gradient_accumulation_steps'],
+            config.get('image_eval_micro_batch_size_per_gpu', config.get('eval_micro_batch_size_per_gpu', model_engine.train_micro_batch_size_per_gpu())),
         )
 
     # Might be useful because we set things in fp16 / bf16 without explicitly enabling Deepspeed fp16 mode.

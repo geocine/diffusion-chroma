@@ -77,6 +77,7 @@ def load_safetensors(path):
 
 
 def load_state_dict(path):
+    path = str(path)
     if path.endswith('.safetensors'):
         return load_safetensors(path)
     else:
