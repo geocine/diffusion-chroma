@@ -62,4 +62,7 @@ else
     exit 1
 fi
 
+# Create images folder
+mkdir -p images
+
 echo "Initialization complete!" 

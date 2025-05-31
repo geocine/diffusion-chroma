@@ -122,6 +122,23 @@ def resize_image(input_path, output_path, size=(512, 512)):
         img.thumbnail(size)
         img.save(output_path)
 
+def get_existing_caption(image_path):
+    """Check if there's a .txt file with the same name as the image and return its content."""
+    base_name = os.path.splitext(image_path)[0]
+    txt_path = f"{base_name}.txt"
+    
+    if os.path.exists(txt_path):
+        try:
+            with open(txt_path, 'r', encoding='utf-8') as f:
+                caption = f.read().strip()
+                if caption:
+                    logging.info(f"Found existing caption file: {txt_path}")
+                    return caption
+        except Exception as e:
+            logging.error(f"Error reading caption file {txt_path}: {str(e)}")
+    
+    return None
+
 def rename_and_process_images(input_folder, output_folder, prefix, metadata_path=None, clear_existing=False):
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
@@ -172,8 +189,16 @@ def rename_and_process_images(input_folder, output_folder, prefix, metadata_path
             # Get original image dimensions
             width, height = get_image_dimensions(new_path)
             
-            # Get caption directly from the original image
-            caption_result = caption_image(new_path)
+            # First, check if there's an existing caption file in the input folder
+            existing_caption = get_existing_caption(old_path)
+            
+            if existing_caption:
+                caption_result = existing_caption
+                logging.info(f"Using existing caption for {filename}")
+            else:
+                # Get caption directly from the original image
+                caption_result = caption_image(new_path)
+                logging.info(f"Generated new caption for {filename}")
             
             # Save caption
             if caption_result:
