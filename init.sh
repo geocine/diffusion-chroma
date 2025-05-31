@@ -50,7 +50,7 @@ chmod +x run.sh
 echo "Installing dependencies..."
 export PYTHONWARNINGS=ignore
 export PIP_ROOT_USER_ACTION=ignore
-pip install ninja
+pip install 'https://github.com/geocine/diffusion-chroma/releases/download/flash_attn/flash_attn-2.7.4.post1+cuda126torch2.7cxx11abiFALSE-cp310-cp310-linux_x86_64.whl'
 pip install torch torchvision torchaudio --force-reinstall --extra-index-url https://download.pytorch.org/whl/cu126 && pip install -r requirements.txt
 
 # Make the download script executable and run it
